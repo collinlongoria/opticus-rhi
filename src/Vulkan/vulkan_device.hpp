@@ -22,6 +22,9 @@ class VulkanCommandList;
 
 class VulkanDevice : public IRenderDevice {
 public:
+    VulkanDevice() = default;
+    ~VulkanDevice() override;
+
     bool Initialize(const DeviceInitDescriptor &desc) override;
     void Shutdown() override;
 
@@ -62,7 +65,7 @@ private:
     // Helpers
     void CreateInstance(bool enableValidation);
     void SetupDebugMessenger();
-    void CreateSurface(void* nativeWindowHandle);
+    void CreateSurface(const SurfaceCreateCallback& callback);
     void SelectPhysicalDevice(DevicePreference pref);
     void CreateLogicalDevice();
     void CreateSyncObjects();

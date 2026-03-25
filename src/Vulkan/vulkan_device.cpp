@@ -15,14 +15,6 @@
 #include <algorithm>
 #include <iostream>
 
-#ifdef _WIN32
-#include <vulkan/vulkan_win32.h>
-#endif
-
-#ifdef __linux__
-#include <vulkan/vulkan_xcb.h>
-#endif
-
 namespace opticus {
 
 static const char* VALIDATION_LAYER = "VK_LAYER_KHRONOS_validation";
@@ -315,13 +307,17 @@ private:
     VkImageView m_currentImageView{VK_NULL_HANDLE};
 };
 
+VulkanDevice::~VulkanDevice() {
+    Shutdown();
+}
+
 bool VulkanDevice::Initialize(const DeviceInitDescriptor &desc) {
     try {
         CreateInstance(desc.enableValidationLayers);
         if (desc.enableValidationLayers) {
             SetupDebugMessenger();
         }
-        CreateSurface(desc.nativeWindowHandle);
+        CreateSurface(desc.surfaceCreateCallback);
         SelectPhysicalDevice(desc.preference);
         CreateLogicalDevice();
         CreateSyncObjects();
@@ -445,5 +441,258 @@ void VulkanDevice::BeginFrame() {
     m_currentImageIndex = imageIndex;
 }
 
+ICommandList* VulkanDevice::GetGraphicsCommandList() {
+    return m_commandList.get();
+}
+
+void VulkanDevice::SubmitAndPresent() {
+    // Transition to present layout
+    uint32_t imgCount = 0;
+    vkGetSwapchainImagesKHR(m_logicalDevice, m_swapchain->GetHandle(), &imgCount, nullptr);
+    std::vector<VkImage> images(imgCount);
+    vkGetSwapchainImagesKHR(m_logicalDevice, m_swapchain->GetHandle(), &imgCount, images.data());
+
+    m_commandList->TransitionImageLayout(
+        images[m_currentImageIndex],
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, 0);
+
+    m_commandList->End();
+
+    VkCommandBuffer cmd = m_commandList->GetHandle();
+    VkSemaphore waitSemaphores[] = {m_imageAvailableSemaphore};
+    VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+    VkSemaphore signalSemaphores[] = {m_renderFinishedSemaphore};
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.waitSemaphoreCount = 1;
+    submitInfo.pWaitSemaphores = waitSemaphores;
+    submitInfo.pWaitDstStageMask = waitStages;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &cmd;
+    submitInfo.signalSemaphoreCount = 1;
+    submitInfo.pSignalSemaphores = signalSemaphores;
+
+    if (vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, m_inFlightFence) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to submit command buffer");
+    }
+
+    VkSwapchainKHR swapchains[] = {m_swapchain->GetHandle()};
+    VkPresentInfoKHR presentInfo{};
+    presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    presentInfo.waitSemaphoreCount = 1;
+    presentInfo.pWaitSemaphores = signalSemaphores;
+    presentInfo.swapchainCount = 1;
+    presentInfo.pSwapchains = swapchains;
+    presentInfo.pImageIndices = &m_currentImageIndex;
+
+    vkQueuePresentKHR(m_graphicsQueue, &presentInfo);
+}
+
+void VulkanDevice::WaitIdle() {
+    if (m_logicalDevice != VK_NULL_HANDLE) {
+        vkDeviceWaitIdle(m_logicalDevice);
+    }
+}
+
+void VulkanDevice::CreateInstance(bool enableValidation) {
+    VkApplicationInfo appInfo{};
+    appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    appInfo.pApplicationName = "Opticus";
+    appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
+    appInfo.pEngineName = "Opticus";
+    appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
+    appInfo.apiVersion = VK_API_VERSION_1_4;
+
+    std::vector<const char*> extensions = {
+        VK_KHR_SURFACE_EXTENSION_NAME,
+    };
+
+    std::vector<const char*> layers;
+
+    if (enableValidation) {
+        extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+        layers.push_back(VALIDATION_LAYER);
+    }
+
+    VkInstanceCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    createInfo.pApplicationInfo = &appInfo;
+    createInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
+    createInfo.ppEnabledExtensionNames = extensions.data();
+    createInfo.enabledLayerCount = static_cast<uint32_t>(layers.size());
+    createInfo.ppEnabledLayerNames = layers.data();
+
+    if (vkCreateInstance(&createInfo, nullptr, &m_instance) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create Vulkan instance");
+    }
+}
+
+void VulkanDevice::SetupDebugMessenger() {
+    VkDebugUtilsMessengerCreateInfoEXT createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+    createInfo.messageSeverity =
+        VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT |
+        VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+        VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+    createInfo.messageType =
+        VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+        VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+        VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+    createInfo.pfnUserCallback = debugCallback;
+
+    if (CreateDebugUtilsMessengerEXT(m_instance, &createInfo, nullptr, &m_debugMessenger) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to set up debug messenger");
+    }
+}
+
+void VulkanDevice::CreateSurface(const SurfaceCreateCallback& callback) {
+    if (!callback) {
+        throw std::runtime_error("No surface creation callback provided to RHI.");
+    }
+
+    m_surface = static_cast<VkSurfaceKHR>(callback(m_instance));
+
+    if (m_surface == VK_NULL_HANDLE) {
+        throw std::runtime_error("Surface creation callback failed to return a valid surface.");
+    }
+}
+
+void VulkanDevice::SelectPhysicalDevice(DevicePreference pref) {
+    uint32_t deviceCount = 0;
+    vkEnumeratePhysicalDevices(m_instance, &deviceCount, nullptr);
+    if (deviceCount == 0) {
+        throw std::runtime_error("No Vulkan-capable GPUs found");
+    }
+
+    std::vector<VkPhysicalDevice> devices(deviceCount);
+    vkEnumeratePhysicalDevices(m_instance, &deviceCount, devices.data());
+
+    VkPhysicalDevice fallback = VK_NULL_HANDLE;
+
+    for (const auto& device : devices) {
+        VkPhysicalDeviceProperties props;
+        vkGetPhysicalDeviceProperties(device, &props);
+
+        // Check for a graphics queue family that supports presentation
+        uint32_t queueFamilyCount = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, nullptr);
+        std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
+        vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, queueFamilies.data());
+
+        bool suitable = false;
+        for (uint32_t i = 0; i < queueFamilyCount; i++) {
+            VkBool32 presentSupport = VK_FALSE;
+            vkGetPhysicalDeviceSurfaceSupportKHR(device, i, m_surface, &presentSupport);
+
+            if ((queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && presentSupport) {
+                suitable = true;
+                break;
+            }
+        }
+        if (!suitable) continue;
+
+        bool isDiscrete = (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU);
+
+        if (pref == DevicePreference::HighPerformance && isDiscrete) {
+            m_physicalDevice = device;
+            return;
+        }
+        if (pref == DevicePreference::LowPower && !isDiscrete) {
+            m_physicalDevice = device;
+            return;
+        }
+
+        if (fallback == VK_NULL_HANDLE) {
+            fallback = device;
+        }
+    }
+
+    if (fallback != VK_NULL_HANDLE) {
+        m_physicalDevice = fallback;
+    } else {
+        throw std::runtime_error("Failed to find a suitable GPU");
+    }
+}
+
+void VulkanDevice::CreateLogicalDevice() {
+    // Find graphics + present queue family
+    uint32_t queueFamilyCount = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(m_physicalDevice, &queueFamilyCount, nullptr);
+    std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
+    vkGetPhysicalDeviceQueueFamilyProperties(m_physicalDevice, &queueFamilyCount, queueFamilies.data());
+
+    bool found = false;
+    for (uint32_t i = 0; i < queueFamilyCount; i++) {
+        VkBool32 presentSupport = VK_FALSE;
+        vkGetPhysicalDeviceSurfaceSupportKHR(m_physicalDevice, i, m_surface, &presentSupport);
+
+        if ((queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && presentSupport) {
+            m_graphicsQueueFamily = i;
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        throw std::runtime_error("Failed to find a graphics+present queue family");
+    }
+
+    float queuePriority = 1.0f;
+    VkDeviceQueueCreateInfo queueCreateInfo{};
+    queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+    queueCreateInfo.queueFamilyIndex = m_graphicsQueueFamily;
+    queueCreateInfo.queueCount = 1;
+    queueCreateInfo.pQueuePriorities = &queuePriority;
+
+    const std::vector<const char*> deviceExtensions = {
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+        VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
+    };
+
+    VkPhysicalDeviceDynamicRenderingFeatures dynamicRenderingFeature{};
+    dynamicRenderingFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;
+    dynamicRenderingFeature.dynamicRendering = VK_TRUE;
+
+    VkPhysicalDeviceSynchronization2Features sync2Feature{};
+    sync2Feature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES;
+    sync2Feature.synchronization2 = VK_TRUE;
+    sync2Feature.pNext = &dynamicRenderingFeature;
+
+    VkPhysicalDeviceFeatures deviceFeatures{};
+
+    VkDeviceCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    createInfo.pNext = &sync2Feature;
+    createInfo.queueCreateInfoCount = 1;
+    createInfo.pQueueCreateInfos = &queueCreateInfo;
+    createInfo.pEnabledFeatures = &deviceFeatures;
+    createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
+    createInfo.ppEnabledExtensionNames = deviceExtensions.data();
+
+    if (vkCreateDevice(m_physicalDevice, &createInfo, nullptr, &m_logicalDevice) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create logical device");
+    }
+
+    vkGetDeviceQueue(m_logicalDevice, m_graphicsQueueFamily, 0, &m_graphicsQueue);
+}
+
+void VulkanDevice::CreateSyncObjects() {
+    VkSemaphoreCreateInfo semaphoreInfo{};
+    semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+
+    VkFenceCreateInfo fenceInfo{};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+
+    if (vkCreateSemaphore(m_logicalDevice, &semaphoreInfo, nullptr, &m_imageAvailableSemaphore) != VK_SUCCESS ||
+        vkCreateSemaphore(m_logicalDevice, &semaphoreInfo, nullptr, &m_renderFinishedSemaphore) != VK_SUCCESS ||
+        vkCreateFence(m_logicalDevice, &fenceInfo, nullptr, &m_inFlightFence) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create sync objects");
+        }
+}
 
 }
