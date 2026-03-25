@@ -13,6 +13,7 @@
 #ifndef OPTICUS_CORE_HPP
 #define OPTICUS_CORE_HPP
 #include <cstdint>
+#include <functional>
 #include <string>
 
 namespace opticus {
@@ -44,11 +45,14 @@ struct AdapterInfo {
     bool isDiscrete;
 };
 
+// Callback that takes an Instance and returns a Surface
+using SurfaceCreateCallback = std::function<void*(void* instance)>;
+
 struct DeviceInitDescriptor {
     GraphicsAPI api;
     DevicePreference preference;
     bool enableValidationLayers;
-    void* nativeWindowHandle;
+    SurfaceCreateCallback surfaceCreateCallback;
     uint32_t frameBufferWidth;
     uint32_t frameBufferHeight;
 };
