@@ -21,9 +21,9 @@ static const char* VALIDATION_LAYER = "VK_LAYER_KHRONOS_validation";
 
 static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT severity,
-    VkDebugUtilsMessageTypeFlagsEXT type,
+    [[maybe_unused]] VkDebugUtilsMessageTypeFlagsEXT type,
     const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
-    void* userData) {
+    [[maybe_unused]] void* userData) {
     if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
         std::cerr << "[Vulkan Validation]" << pCallbackData->pMessage << std::endl;
     }
@@ -306,6 +306,8 @@ private:
     VkCommandBuffer m_commandBuffer{VK_NULL_HANDLE};
     VkImageView m_currentImageView{VK_NULL_HANDLE};
 };
+
+VulkanDevice::VulkanDevice() = default;
 
 VulkanDevice::~VulkanDevice() {
     Shutdown();
