@@ -12,6 +12,12 @@
 
 #include "Vulkan/vulkan_device.hpp"
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <vulkan/vulkan_win32.h>
+#endif
+
 #include <algorithm>
 #include <iostream>
 
@@ -319,7 +325,7 @@ bool VulkanDevice::Initialize(const DeviceInitDescriptor &desc) {
         if (desc.enableValidationLayers) {
             SetupDebugMessenger();
         }
-        CreateSurface(desc.surfaceCreateCallback);
+        CreateSurface(desc.nativeWindowHandle);
         SelectPhysicalDevice(desc.preference);
         CreateLogicalDevice();
         CreateSyncObjects();
@@ -512,6 +518,9 @@ void VulkanDevice::CreateInstance(bool enableValidation) {
 
     std::vector<const char*> extensions = {
         VK_KHR_SURFACE_EXTENSION_NAME,
+#if defined(_WIN32)
+        VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
+#endif
     };
 
     std::vector<const char*> layers;
@@ -552,16 +561,23 @@ void VulkanDevice::SetupDebugMessenger() {
     }
 }
 
-void VulkanDevice::CreateSurface(const SurfaceCreateCallback& callback) {
-    if (!callback) {
-        throw std::runtime_error("No surface creation callback provided to RHI.");
+void VulkanDevice::CreateSurface(void* nativeWindowHandle) {
+    if (!nativeWindowHandle) {
+        throw std::runtime_error("No native window handle provided to RHI.");
     }
 
-    m_surface = static_cast<VkSurfaceKHR>(callback(m_instance));
+#if defined(_WIN32)
+    VkWin32SurfaceCreateInfoKHR createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+    createInfo.hwnd = static_cast<HWND>(nativeWindowHandle);
+    createInfo.hinstance = GetModuleHandle(nullptr); // Grabs the current process instance
 
-    if (m_surface == VK_NULL_HANDLE) {
-        throw std::runtime_error("Surface creation callback failed to return a valid surface.");
+    if (vkCreateWin32SurfaceKHR(m_instance, &createInfo, nullptr, &m_surface) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create Win32 surface");
     }
+#else
+    throw std::runtime_error("Platform surface creation not implemented for this OS.");
+#endif
 }
 
 void VulkanDevice::SelectPhysicalDevice(DevicePreference pref) {

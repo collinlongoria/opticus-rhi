@@ -65,7 +65,7 @@ private:
     // Helpers
     void CreateInstance(bool enableValidation);
     void SetupDebugMessenger();
-    void CreateSurface(const SurfaceCreateCallback& callback);
+    void CreateSurface(void* nativeWindowHandle);
     void SelectPhysicalDevice(DevicePreference pref);
     void CreateLogicalDevice();
     void CreateSyncObjects();
