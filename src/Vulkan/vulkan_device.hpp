@@ -22,7 +22,7 @@ class VulkanCommandList;
 
 class VulkanDevice : public IRenderDevice {
 public:
-    VulkanDevice() = default;
+    VulkanDevice();
     ~VulkanDevice() override;
 
     bool Initialize(const DeviceInitDescriptor &desc) override;
